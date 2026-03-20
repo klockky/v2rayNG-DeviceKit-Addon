@@ -3,13 +3,16 @@ package com.v2ray.devicekit
 import androidx.preference.CheckBoxPreference
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
+import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
+import kotlin.random.Random
 
 object UiBinder {
 
     private data class Prefs(
         val hwidEnabled: CheckBoxPreference?,
         val hwidVal: EditTextPreference?,
+        val hwidRandomize: Preference?,
         val hwidOs: ListPreference?,
         val hwidOsVer: EditTextPreference?,
         val hwidModel: EditTextPreference?,
@@ -36,6 +39,15 @@ object UiBinder {
             true
         }
 
+        prefs.hwidRandomize?.setOnPreferenceClickListener {
+            val newHwid = ByteArray(8).also { Random.nextBytes(it) }.joinToString("") { "%02x".format(it) }
+            prefs.hwidVal?.text = newHwid
+            if (prefs.hwidVal?.summaryProvider == null) {
+                prefs.hwidVal?.summary = newHwid
+            }
+            true
+        }
+
         prefs.uaPreset?.setOnPreferenceChangeListener { pref, newValue ->
             val lp = pref as ListPreference
             val valueStr = newValue?.toString().orEmpty()
@@ -58,6 +70,7 @@ object UiBinder {
         return Prefs(
             hwidEnabled = fragment.findPreference(PrefKeys.HWID_ENABLED),
             hwidVal = fragment.findPreference(PrefKeys.HWID_VAL),
+            hwidRandomize = fragment.findPreference(PrefKeys.HWID_RANDOMIZE),
             hwidOs = fragment.findPreference(PrefKeys.HWID_OS),
             hwidOsVer = fragment.findPreference(PrefKeys.HWID_OS_VER),
             hwidModel = fragment.findPreference(PrefKeys.HWID_MODEL),
@@ -84,6 +97,7 @@ object UiBinder {
         val showGroup = enabled
 
         prefs.hwidVal?.isVisible = showGroup
+        prefs.hwidRandomize?.isVisible = showGroup
         prefs.hwidOs?.isVisible = showGroup
         prefs.hwidOsVer?.isVisible = showGroup
         prefs.hwidModel?.isVisible = showGroup

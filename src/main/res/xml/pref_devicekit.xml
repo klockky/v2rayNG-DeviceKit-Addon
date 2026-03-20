@@ -14,6 +14,12 @@
             android:title="@string/title_pref_hwid_val"
             android:summary="@string/summary_pref_hwid_val" />
 
+        <Preference
+            android:key="pref_hwid_randomize"
+            android:dependency="pref_hwid_enabled"
+            android:title="@string/title_pref_hwid_randomize"
+            android:summary="@string/summary_pref_hwid_randomize" />
+
         <ListPreference
             android:key="pref_hwid_os"
             android:dependency="pref_hwid_enabled"

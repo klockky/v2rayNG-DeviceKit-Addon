@@ -23,5 +23,7 @@
     <string name="title_pref_hwid_user_agent_flclashx_version">FlClashX version</string>
     <string name="title_pref_hwid_flclashx_platform">FlClashX platform</string>
     <string name="summary_pref_hwid_user_agent_flclashx_version">Version part for FlClash X/v&lt;version&gt; preset</string>
+    <string name="title_pref_hwid_randomize">Randomize HWID</string>
+    <string name="summary_pref_hwid_randomize">Generate a random UUID and set it as HWID</string>
     <string name="title_devicekit_settings">DeviceKit</string>
 </resources>

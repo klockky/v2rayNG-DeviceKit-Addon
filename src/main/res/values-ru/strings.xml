@@ -23,5 +23,7 @@
     <string name="title_pref_hwid_user_agent_flclashx_version">Версия FlClashX</string>
     <string name="title_pref_hwid_flclashx_platform">Платформа FlClashX</string>
     <string name="summary_pref_hwid_user_agent_flclashx_version">Версия для пресета FlClash X/v&lt;версия&gt;</string>
+    <string name="title_pref_hwid_randomize">Случайный HWID</string>
+    <string name="summary_pref_hwid_randomize">Сгенерировать случайный UUID и установить его как HWID</string>
     <string name="title_devicekit_settings">DeviceKit</string>
 </resources>

@@ -8,6 +8,8 @@ internal object PrefKeys {
     const val HWID_MODEL = "pref_hwid_model"
     const val HWID_LOCALE = "pref_hwid_locale"
 
+    const val HWID_RANDOMIZE = "pref_hwid_randomize"
+
     const val UA_PRESET = "pref_hwid_user_agent_preset"
     const val UA_CUSTOM = "pref_hwid_user_agent"
     const val UA_HAPP_VERSION = "pref_hwid_user_agent_happ_version"
