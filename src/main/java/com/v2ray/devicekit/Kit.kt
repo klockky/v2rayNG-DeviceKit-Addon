@@ -46,6 +46,62 @@ object Kit {
         return presetUa ?: defaultUserAgent
     }
 
+    /**
+     * Builds the full set of request headers (User-agent + optional HWID/device
+     * headers) for the given [config], without binding to any HTTP client.
+     *
+     * Preserves insertion order so callers may apply them deterministically.
+     */
+    fun buildHeaders(
+        context: Context,
+        config: Config,
+        subscriptionUserAgent: String?,
+        defaultUserAgent: String,
+    ): Map<String, String> {
+        val headers = LinkedHashMap<String, String>()
+        headers["User-agent"] = resolveUserAgent(config, subscriptionUserAgent, defaultUserAgent)
+
+        if (!config.enabled) return headers
+
+        val hwidToSend = config.customHwid?.trim().takeIf { !it.isNullOrEmpty() }
+            ?: DeviceInfo.hardwareId(context)
+        if (hwidToSend.isNullOrEmpty()) return headers
+
+        headers["X-HWID"] = hwidToSend
+
+        val osRaw = config.customOs?.trim().orEmpty().ifEmpty { DeviceInfo.osValue() }
+        headers["X-Device-OS"] = hwidOsHeaderValue(osRaw)
+
+        val osVer = config.customOsVersion?.trim().orEmpty().ifEmpty { DeviceInfo.osVersion() }
+        headers["X-Ver-OS"] = osVer
+
+        val locale = config.customLocale?.trim().orEmpty().ifEmpty { DeviceInfo.locale() }
+        if (locale.isNotEmpty()) {
+            headers["X-Device-Locale"] = locale
+        }
+
+        val model = config.customModel?.trim().orEmpty().ifEmpty { DeviceInfo.model() }
+        headers["X-Device-Model"] = model
+
+        return headers
+    }
+
+    /**
+     * Loads the persisted DeviceKit settings and returns the resulting request
+     * headers. Client-agnostic entry point for OkHttp / Ktor / etc. — apply each
+     * entry with whatever header setter the caller's HTTP client provides.
+     */
+    fun headersFromSettings(
+        context: Context,
+        subscriptionUserAgent: String?,
+        defaultUserAgent: String,
+        appVersionName: String,
+    ): Map<String, String> {
+        val config = SettingsStore.loadConfig(appVersionName)
+            ?: Config(enabled = false)
+        return buildHeaders(context, config, subscriptionUserAgent, defaultUserAgent)
+    }
+
     fun applyToConnection(
         conn: HttpURLConnection,
         context: Context,
@@ -53,30 +109,9 @@ object Kit {
         subscriptionUserAgent: String?,
         defaultUserAgent: String,
     ) {
-        val finalUserAgent = resolveUserAgent(config, subscriptionUserAgent, defaultUserAgent)
-        conn.setRequestProperty("User-agent", finalUserAgent)
-
-        if (!config.enabled) return
-
-        val hwidToSend = config.customHwid?.trim().takeIf { !it.isNullOrEmpty() }
-            ?: DeviceInfo.hardwareId(context)
-        if (hwidToSend.isNullOrEmpty()) return
-
-        conn.setRequestProperty("X-HWID", hwidToSend)
-
-        val osRaw = config.customOs?.trim().orEmpty().ifEmpty { DeviceInfo.osValue() }
-        conn.setRequestProperty("X-Device-OS", hwidOsHeaderValue(osRaw))
-
-        val osVer = config.customOsVersion?.trim().orEmpty().ifEmpty { DeviceInfo.osVersion() }
-        conn.setRequestProperty("X-Ver-OS", osVer)
-
-        val locale = config.customLocale?.trim().orEmpty().ifEmpty { DeviceInfo.locale() }
-        if (locale.isNotEmpty()) {
-            conn.setRequestProperty("X-Device-Locale", locale)
+        buildHeaders(context, config, subscriptionUserAgent, defaultUserAgent).forEach { (name, value) ->
+            conn.setRequestProperty(name, value)
         }
-
-        val model = config.customModel?.trim().orEmpty().ifEmpty { DeviceInfo.model() }
-        conn.setRequestProperty("X-Device-Model", model)
     }
 
     fun applyToConnectionFromSettings(
