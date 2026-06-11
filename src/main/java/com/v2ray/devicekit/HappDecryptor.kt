@@ -3,8 +3,10 @@ package com.v2ray.devicekit
 import android.net.Uri
 import android.util.Base64
 import java.math.BigInteger
-import java.nio.ByteBuffer
-import java.nio.charset.CodingErrorAction
+import java.security.KeyFactory
+import java.security.PrivateKey
+import java.security.spec.PKCS8EncodedKeySpec
+import javax.crypto.Cipher
 
 object HappDecryptor {
     private const val PREFIX = "happ://"
@@ -344,47 +346,140 @@ object HappDecryptor {
         )
     }
 
-    private val rsaKeysByHost: Map<String, List<RsaPrivateKey>> by lazy {
-        rsaKeyMaterials
-            .groupBy { it.host }
-            .mapValues { (_, materials) ->
-                materials.map { material ->
-                    RsaPrivateKey(
-                        modulusBytes = material.modulusBytes,
-                        privateExponentBytes = material.privateExponentBytes,
-                    )
-                }
-            }
+    private val rsaKeysByHost: Map<String, RsaPrivateKey> by lazy {
+        rsaKeyMaterials.associate { material ->
+            material.host to RsaPrivateKey(material.modulusBytes, material.privateExponentBytes)
+        }
     }
 
+    private val crypt5KeyCache = HashMap<String, PrivateKey>()
+
+    /**
+     * Decrypts a happ:// deep link to the underlying URL, or returns null if the
+     * input is not a (supported) happ link or decryption/authentication fails.
+     *
+     * Supported: crypt, crypt2, crypt3, crypt4 (RSA block) and crypt5 (RSA-wrapped
+     * ChaCha20-Poly1305).
+     */
     fun tryDecrypt(input: String?): String? = runCatching {
         if (input.isNullOrBlank()) return@runCatching null
 
         val (host, payload) = parseHappUrl(input) ?: return@runCatching null
 
-        val rsaKeys = rsaKeysByHost[host].orEmpty()
-        if (rsaKeys.isEmpty()) return@runCatching null
+        when (host) {
+            "crypt", "crypt2", "crypt3", "crypt4" -> decryptRsaBlocks(host, payload)
+            "crypt5" -> decryptCrypt5(payload)
+            else -> null
+        }
+    }.getOrNull()
 
-        val cleanedPayload = normalizeBase64Payload(payload)
-        val maxCiphertextSizeBytes = rsaKeys.maxOf { it.keySizeBytes }
-        val ciphertextBytes = findCiphertextBytes(cleanedPayload, maxCiphertextSizeBytes) ?: return@runCatching null
+    // ----- crypt / crypt2 / crypt3 / crypt4 : RSA block decryption -----
 
-        val ciphertextInt = BigInteger(1, ciphertextBytes)
+    private fun decryptRsaBlocks(host: String, payload: String): String? {
+        val key = rsaKeysByHost[host] ?: return null
+        val cipherBytes = base64UrlDecode(payload) ?: return null
+        if (cipherBytes.isEmpty()) return null
 
-        val utf8Decoder = Charsets.UTF_8
-            .newDecoder()
-            .onMalformedInput(CodingErrorAction.IGNORE)
-            .onUnmappableCharacter(CodingErrorAction.IGNORE)
-
-        for (privateKey in rsaKeys) {
-            val encodedMessageInt = ciphertextInt.modPow(privateKey.privateExponent, privateKey.modulus)
-            val encodedMessageBytes = toFixedLength(encodedMessageInt, privateKey.keySizeBytes)
-            val plaintextBytes = pkcs1v15Unpad(encodedMessageBytes) ?: continue
-            return@runCatching utf8Decoder.decode(ByteBuffer.wrap(plaintextBytes)).toString()
+        val plaintext = ArrayList<Byte>(cipherBytes.size)
+        var offset = 0
+        while (offset < cipherBytes.size) {
+            val end = minOf(offset + key.keySizeBytes, cipherBytes.size)
+            val block = cipherBytes.copyOfRange(offset, end)
+            val decryptedInt = BigInteger(1, block).modPow(key.privateExponent, key.modulus)
+            val encoded = toFixedLength(decryptedInt, key.keySizeBytes)
+            val unpadded = pkcs1v15Unpad(encoded) ?: return null
+            for (b in unpadded) plaintext.add(b)
+            offset += key.keySizeBytes
         }
 
-        null
-    }.getOrNull()
+        return String(plaintext.toByteArray(), Charsets.UTF_8)
+    }
+
+    // ----- crypt5 : RSA-wrapped ChaCha20-Poly1305 -----
+
+    private fun decryptCrypt5(payload: String): String? {
+        val shuffled = blockPairSwap(payload)
+        if (shuffled.length < 8) return null
+
+        val marker = shuffled.substring(0, 4) + shuffled.substring(shuffled.length - 4)
+        val body = shuffled.substring(4, shuffled.length - 4)
+        if (body.length < 13) return null
+
+        val nonceStr = body.substring(0, 12)
+        val rest = body.substring(12)
+
+        val digits = rest.takeWhile { it.isDigit() }
+        if (digits.isEmpty()) return null
+        val segmentLen = digits.toIntOrNull() ?: return null
+
+        val packed = rest.substring(digits.length)
+        if (packed.length < 1 + segmentLen) return null
+
+        val urlB64 = packed.substring(1, 1 + segmentLen)
+        val encStr = packed.substring(1 + segmentLen)
+
+        val privateKey = loadCrypt5Key(marker) ?: return null
+
+        // RSA(PKCS#1 v1.5) unwrap → ASCII base64 text of the (pair-swapped) ChaCha key
+        val rsaPlain = rsaPkcs1Decrypt(privateKey, base64UrlDecode(encStr) ?: return null) ?: return null
+        val chachaKey = base64UrlDecode(swapPairs(String(rsaPlain, Charsets.ISO_8859_1))) ?: return null
+        if (chachaKey.size != 32) return null
+
+        val nonce = nonceStr.toByteArray(Charsets.ISO_8859_1)
+        if (nonce.size != 12) return null
+
+        val cipherWithTag = base64UrlDecode(urlB64) ?: return null
+        val intermediate = HappChaCha20Poly1305.decrypt(chachaKey, nonce, cipherWithTag) ?: return null
+
+        // intermediate is ASCII base64 text of the (pair-swapped) final URL
+        val finalBytes = base64UrlDecode(swapPairs(String(intermediate, Charsets.ISO_8859_1))) ?: return null
+        return String(finalBytes, Charsets.UTF_8)
+    }
+
+    private fun loadCrypt5Key(marker: String): PrivateKey? {
+        crypt5KeyCache[marker]?.let { return it }
+        val b64 = HappCrypt5Keys.keys[marker] ?: return null
+        return runCatching {
+            val der = Base64.decode(b64, Base64.NO_WRAP)
+            val key = KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(der))
+            crypt5KeyCache[marker] = key
+            key
+        }.getOrNull()
+    }
+
+    private fun rsaPkcs1Decrypt(privateKey: PrivateKey, cipherBytes: ByteArray): ByteArray? =
+        runCatching {
+            val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+            cipher.init(Cipher.DECRYPT_MODE, privateKey)
+            cipher.doFinal(cipherBytes)
+        }.getOrNull()
+
+    /** Swap adjacent character pairs: ABCD → BADC (odd trailing char unchanged). */
+    private fun swapPairs(s: String): String {
+        val arr = s.toCharArray()
+        var i = 0
+        while (i + 1 < arr.size) {
+            val t = arr[i]; arr[i] = arr[i + 1]; arr[i + 1] = t
+            i += 2
+        }
+        return String(arr)
+    }
+
+    /** Per full 4-char block ABCD → CDAB; trailing 1-3 chars unchanged. */
+    private fun blockPairSwap(s: String): String {
+        val fullLen = s.length - (s.length % 4)
+        val sb = StringBuilder(s.length)
+        var offset = 0
+        while (offset < fullLen) {
+            sb.append(s, offset + 2, offset + 4)
+            sb.append(s, offset, offset + 2)
+            offset += 4
+        }
+        sb.append(s, fullLen, s.length)
+        return sb.toString()
+    }
+
+    // ----- shared helpers -----
 
     private fun parseHappUrl(input: String): Pair<String, String>? {
         val trimmed = input.trim()
@@ -408,13 +503,18 @@ object HappDecryptor {
         return host to payload
     }
 
-    private fun normalizeBase64Payload(payload: String): String {
-        return payload
-            .replace(' ', '+')
-            .replace(BASE64_STRIP_REGEX, "")
+    /** URL-safe (and standard) base64 → bytes, tolerant of missing padding/whitespace. */
+    private fun base64UrlDecode(input: String): ByteArray? {
+        var s = input.replace(BASE64_STRIP_REGEX, "")
             .replace('-', '+')
             .replace('_', '/')
             .trimEnd('=')
+        if (s.isEmpty()) return null
+        // a base64 length of (4n+1) is impossible; drop the stray trailing char
+        if (s.length % 4 == 1) s = s.dropLast(1)
+        val padLen = (4 - (s.length % 4)) % 4
+        val padded = s + "=".repeat(padLen)
+        return runCatching { Base64.decode(padded, Base64.NO_WRAP) }.getOrNull()
     }
 
     private fun pkcs1v15Unpad(block: ByteArray): ByteArray? {
@@ -429,38 +529,8 @@ object HappDecryptor {
             }
         }
         if (sep < 10) return null
-        for (i in 2 until sep) {
-            if (block[i] == 0.toByte()) return null
-        }
 
         return block.copyOfRange(sep + 1, block.size)
-    }
-
-    private fun findCiphertextBytes(body: String, maxSizeBytes: Int): ByteArray? {
-        for (c in 0..8) {
-            var t = if (c == 0) body else body.dropLast(c)
-            while (t.length % 4 == 1 && t.isNotEmpty()) {
-                t = t.dropLast(1)
-            }
-            if (t.isEmpty()) continue
-
-            val padLen = (4 - (t.length % 4)) % 4
-            val padded = t + "=".repeat(padLen)
-
-            val decoded = try {
-                Base64.decode(padded, Base64.NO_WRAP)
-            } catch (_: Exception) {
-                continue
-            }
-
-            if (decoded.isNotEmpty() && decoded.size <= maxSizeBytes) {
-                return decoded
-            }
-            if (decoded.size == maxSizeBytes + 1 && decoded[0] == 0.toByte()) {
-                return decoded.copyOfRange(1, decoded.size)
-            }
-        }
-        return null
     }
 
     private fun toFixedLength(value: BigInteger, length: Int): ByteArray {
